@@ -157,162 +157,9 @@ Above is a representation of the repository structure that will exist as I conti
 
 ![](https://cdn.hashnode.com/res/hashnode/image/upload/v1763758264494/f389d7c9-a398-44da-8029-31e785143e2f.jpeg align="center")
 
-At the time of this writing, this is what the build.yml file looks like(I fully expect changes in the future as development continues):
-
-```yaml
-name: Build Detections
-on:
-  push:
-    branches: ["main"]
-  pull_request: {}
-
-jobs:
-  build:
-    runs-on: [self-hosted, linux, x64]
-
-    env:
-      SPLUNK_USERNAME: ${{ secrets.SPLUNK_USERNAME }}
-      SPLUNK_PASSWORD: ${{ secrets.SPLUNK_PASSWORD }}
-      SPLUNK_URL: ${{ secrets.SPLUNK_URL }}
-
-    # Timeout to prevent hanging jobs
-    timeout-minutes: 15
-    
-    steps:
-    # Project Checkout
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    # Clean workspace before starting
-    - name: Clean Workspace
-      run: |
-        rm -rf generated/
-
-    # Install and configure Sigma with Splunk plugin
-    - name: Install Sigma
-      run: |
-        python3 -m pip install --upgrade pip
-        python3 -m pip install sigma-cli
-        sigma plugin install splunk
-
-    # Convert Sigma rules into SPL
-    - name: Convert Sigma to SPL
-      run: | 
-        set -e
-        mkdir -p generated/splunk
-        
-        echo "Converting Sigma rules to SPL..."
-        rule_count=0
-        
-        while IFS= read -r rule_file; do
-          file_name=$(basename "$rule_file" .yml)
-          
-          if sigma convert --target splunk --pipeline splunk_windows "$rule_file" > "generated/splunk/${file_name}.spl" 2>&1; then
-            if [ -s "generated/splunk/${file_name}.spl" ]; then
-              echo "${file_name}.spl"
-              rule_count=$((rule_count + 1))
-            else
-              echo "${file_name}.spl is empty"
-              exit 1
-            fi
-          else
-            echo "Failed to convert $rule_file"
-            exit 1
-          fi
-        done < <(find rules -type f -name "*.yml")
-        
-        if [ "$rule_count" -eq 0 ]; then
-          echo "ERROR: No rules converted"
-          exit 1
-        fi
-        
-        echo "Converted $rule_count rule(s)"
-        ls -lh generated/splunk/
-
-    # Save SPL artifact with the name spl-detections to the generated/splunk directory
-    - name: Upload SPL as an artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: spl-detections
-        path: generated/splunk
-
-    # Install Terraform
-    - name: Install Terraform
-      uses: hashicorp/setup-terraform@v3
-
-    # Terraform formatting check
-    - name: Terraform Format
-      working-directory: terraform
-      run: terraform fmt -check
-
-    # Initialize Terraform
-    - name: Terraform Init
-      working-directory: terraform
-      env:
-        TF_VAR_splunk_url: ${{ secrets.SPLUNK_URL }}
-        TF_VAR_splunk_username: ${{ secrets.SPLUNK_USERNAME }}
-        TF_VAR_splunk_password: ${{ secrets.SPLUNK_PASSWORD }}
-        TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
-        TF_VAR_insecure_skip_verify: "true"
-      run: terraform init
-
-    # Test Terraform before deployment
-    - name: Terraform Validate
-      working-directory: terraform
-      env:
-        TF_VAR_splunk_url: ${{ secrets.SPLUNK_URL }}
-        TF_VAR_splunk_username: ${{ secrets.SPLUNK_USERNAME }}
-        TF_VAR_splunk_password: ${{ secrets.SPLUNK_PASSWORD }}
-        TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
-        TF_VAR_insecure_skip_verify: "true"
-      run: terraform validate
-
-    # Terraform plan
-    - name: Terraform Plan
-      id: plan
-      working-directory: terraform
-      env:
-        TF_VAR_splunk_url: ${{ secrets.SPLUNK_URL }}
-        TF_VAR_splunk_username: ${{ secrets.SPLUNK_USERNAME }}
-        TF_VAR_splunk_password: ${{ secrets.SPLUNK_PASSWORD }}
-        TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
-        TF_VAR_insecure_skip_verify: "true"
-      run: |
-        terraform plan -out=tfplan
-        terraform show tfplan
-
-    # Terraform apply
-    - name: Terraform Apply
-      working-directory: terraform
-      env:
-        TF_VAR_splunk_url: ${{ secrets.SPLUNK_URL }}
-        TF_VAR_splunk_username: ${{ secrets.SPLUNK_USERNAME }}
-        TF_VAR_splunk_password: ${{ secrets.SPLUNK_PASSWORD }}
-        TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
-        TF_VAR_insecure_skip_verify: "true"
-      run: |
-        terraform apply tfplan
-        
-        echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Deployed Detection Rules:**" >> $GITHUB_STEP_SUMMARY
-        terraform output -json deployed_detections | jq -r 'to_entries[] | "- **\(.value.name)** (Severity: \(.value.severity))"' >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Total Rules Deployed:** $(terraform output -raw detection_count)" >> $GITHUB_STEP_SUMMARY
-
-# Clean up
-    - name: Cleanup
-      if: always()
-      run: |
-        echo "Cleaning up temporary files..."
-        rm -rf terraform/.terraform/
-        rm -f terraform/tfplan
-        rm -f terraform/terraform.tfstate.backup
-```
-
 ## Build File Breakdown
 
-Lets dissect the build file and cover what each step does.
+The build file can be found in the [repo](https://github.com/Coded-Alchemy/Detections_as_Code/blob/main/.github/workflows/build.yml), I will dissect the build file and cover what each step does.
 
 ### Name & Triggers
 
@@ -547,14 +394,26 @@ I also want to reduce the environment variables used by Terraform from being in 
 
 There are also changes to support the back end storage of Terraform state I had to pause to prevent further delays to publishing this post.
 
+# The Self Hosted Runner
+
+Self Hosted Runners can be configured from the Github repository settings in the Actions menu:
+
+![](https://cdn.hashnode.com/res/hashnode/image/upload/v1763916616635/f80e454b-133f-479e-9cb2-93167f9308ac.png align="center")
+
+I made the decision to use the Self Hosted Runner because all the virtual machines that comprise my home lab sit behind a pfSense firewall and I didnt want to expose my environment. So this option keeps everything contained.
+
+The drawback to this option is that someone could fork the repo and submit a pull request that runs some malicious code. The mitigation for this is that I dont use a service to use the Runner. I have to manually start it when I want to make any changes. This forces me to check the pull requests to ensure nothing I dont want automatically runs when I start the Runner. This is a crude solution, but it is specific to my home lab and Im willing to accept the risk. The VM that hots the Runner gets has snapshots to revert to should anything happen outside my control.
+
 # Conclusion
 
 There are 2 files that get edited that starts of this entire process prior to the pipeline automation:
 
 * The new Sigma rule file that defines the detection that is being added.
     
+
 * locals.tf because I haven’t automated this part of the things yet. So the idea is to have a python script rewrite locals.tf when a new Sigma rule is added to the repository. But I want to make sure I have a solid understanding before I automate this final step to complete full automation.
     
-    There is still development ongoing, this is a fun project for me. Learning Sigma and Terraform are the areas I need the most work in, the rest of the technologies used I have plenty of experience in due to their uses in the software development life cycle. I probably will update this post as things progress, like I did with the [Hash Catnip](https://coded-alchemy.github.io/#/hashcatnip) post.
-    
-    So for now Ill be signing off, I hope you enjoyed this post! Feel free to leave any comments about anything I could do better, Id love to read the feedback.
+
+There is still development ongoing, this is a fun project for me. Learning Sigma and Terraform are the areas I need the most work in, the rest of the technologies used I have plenty of experience in due to their uses in the software development life cycle. I probably will update this post as things progress, like I did with the [Hash Catnip](https://coded-alchemy.github.io/#/hashcatnip) post.
+
+So for now Ill be signing off, I hope you enjoyed this post! Feel free to leave any comments about anything I could do better, Id love to read the feedback.
